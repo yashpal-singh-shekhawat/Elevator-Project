@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Cool graphite-on-off-white — functional, readable for data-dense ops screens */
+    --background: 210 17% 98%;
+    --foreground: 210 15% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 15% 12%;
+
+    /* Safety-amber: the one accent color, used deliberately (primary actions,
+       active nav state, status emphasis) — evokes hazard/maintenance signage,
+       appropriate for lift-equipment software rather than a generic SaaS blue. */
+    --primary: 38 78% 51%;
+    --primary-foreground: 210 20% 10%;
+
+    --secondary: 205 20% 94%;
+    --secondary-foreground: 210 15% 20%;
+
+    --muted: 205 20% 94%;
+    --muted-foreground: 210 10% 42%;
+
+    --accent: 38 78% 96%;
+    --accent-foreground: 38 78% 25%;
+
+    --destructive: 6 65% 45%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 152 38% 34%;
+    --success-foreground: 0 0% 98%;
+
+    --border: 210 16% 88%;
+    --input: 210 16% 88%;
+    --ring: 38 78% 51%;
+    --radius: 0.375rem;
+
+    /* Sidebar reads as a control panel: dark graphite, amber active state */
+    --sidebar: 210 22% 12%;
+    --sidebar-foreground: 205 15% 78%;
+    --sidebar-active: 38 78% 51%;
+    --sidebar-active-foreground: 210 20% 10%;
+    --sidebar-border: 210 20% 20%;
+  }
+
+  .dark {
+    --background: 210 20% 8%;
+    --foreground: 205 15% 92%;
+    --card: 210 18% 11%;
+    --card-foreground: 205 15% 92%;
+    --primary: 38 78% 55%;
+    --primary-foreground: 210 20% 10%;
+    --secondary: 210 16% 16%;
+    --secondary-foreground: 205 15% 88%;
+    --muted: 210 16% 16%;
+    --muted-foreground: 210 10% 62%;
+    --accent: 38 40% 18%;
+    --accent-foreground: 38 78% 75%;
+    --destructive: 6 60% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 152 32% 40%;
+    --success-foreground: 0 0% 98%;
+    --border: 210 16% 20%;
+    --input: 210 16% 20%;
+    --ring: 38 78% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

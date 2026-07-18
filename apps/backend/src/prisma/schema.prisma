@@ -1,0 +1,1155 @@
+// =========================================================================
+// LIFT MANAGEMENT SAAS — PRISMA SCHEMA (Phase 1: Installation + AMC)
+// =========================================================================
+// Design principles applied throughout:
+//  - Every tenant-scoped table carries tenantId + organizationId, indexed,
+//    even though Phase 1 only ever writes 1/1 (via TenantContext middleware).
+//    This means Phase 2 multi-tenancy needs ZERO schema migration.
+//  - Soft delete via deletedAt on every business entity (never hard-delete).
+//  - createdAt/updatedAt on every table. createdById/updatedById are plain
+//    Int columns (not Prisma relations) to avoid an explosion of named
+//    self/cross relations on every model — application layer resolves them
+//    against User when needed. This is a deliberate scalability tradeoff.
+//  - No business status is ever a hardcoded enum string in a workflow table;
+//    statuses are rows in the `Status` master-data table, referenced by FK,
+//    grouped by `entityType`. Services look up status by (entityType, code).
+//  - RBAC is modular: Role and Permission are DB rows (not TS enums), joined
+//    via RolePermission, so Phase 2 can add/edit permissions with zero code
+//    changes — only new rows.
+//  - Checklists and file attachments are generic/polymorphic
+//    (entityType + entityId) so both Installation and AMC reuse the same
+//    tables instead of duplicating Installation-specific / AMC-specific
+//    variants (DRY).
+// =========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// TENANCY (Phase 1: single row each, seeded as id = 1)
+// =========================================================================
+
+model Tenant {
+  id        Int      @id @default(autoincrement())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true) @map("is_active")
+
+  // Super-admin managed company profile (MVP). email is globally unique so a
+  // company contact can't be registered twice. logoUrl holds a relative path
+  // (/uploads/tenant-logos/...) for now; swap to an S3 URL later with no schema
+  // change.
+  contactPerson String? @map("contact_person")
+  email         String? @unique
+  phone         String?
+  address       String?
+  logoUrl       String? @map("logo_url")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organizations Organization[]
+
+  @@map("tenants")
+}
+
+model Organization {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @map("tenant_id")
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@map("organizations")
+}
+
+// =========================================================================
+// AUTH & RBAC
+// =========================================================================
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  tenantId    Int      @map("tenant_id")
+  name        String // Admin | Manager | Engineer | Technician (Phase 1, DB-seeded, not a TS enum)
+  code        String // stable machine key, e.g. "ADMIN"
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users           User[]
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+model Permission {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique // e.g. "installation.create", "amc.assign"
+  module      String // "installation" | "amc" | "master-data" | "users" ...
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           Int      @id @default(autoincrement())
+  roleId       Int      @map("role_id")
+  permissionId Int      @map("permission_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id             Int       @id @default(autoincrement())
+  tenantId       Int       @map("tenant_id")
+  organizationId Int       @map("organization_id")
+  roleId         Int       @map("role_id")
+  email          String
+  passwordHash   String    @map("password_hash")
+  firstName      String    @map("first_name")
+  lastName       String    @map("last_name")
+  phone          String?
+  isActive       Boolean   @default(true) @map("is_active")
+  lastLoginAt    DateTime? @map("last_login_at")
+  deletedAt      DateTime? @map("deleted_at")
+  createdById    Int?      @map("created_by_id")
+  updatedById    Int?      @map("updated_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  refreshTokens             RefreshToken[]
+  assignedInstallationTasks InstallationTask[]     @relation("TaskAssignee")
+  assignedAmcVisits         AmcVisit[]              @relation("VisitTechnician")
+  checkedChecklistItems     ChecklistItem[]         @relation("ChecklistCheckedBy")
+  auditLogs                 AuditLog[]
+  activityLogs              ActivityLog[]
+  leadsAssigned           Lead[]              @relation("LeadAssignee")
+  quotationsPrepared      Quotation[]         @relation("QuotationPreparedBy")
+  quotationsApproved      Quotation[]         @relation("QuotationApprovedBy")
+  workflowTransitions     WorkflowTransition[] @relation("TransitionActionedBy")
+  paymentsVerified        Payment[]           @relation("PaymentVerifiedBy")
+  siteSurveysConducted    SiteSurvey[]        @relation("SiteSurveyedBy")
+  gadDesignsPrepared      GadDesign[]         @relation("GadPreparedBy")
+  gadDesignsReviewed      GadDesign[]         @relation("GadReviewedBy")
+  manufacturingReleased   ManufacturingOrder[] @relation("ManufReleasedBy")
+  manufacturingQcPassed   ManufacturingOrder[] @relation("ManufQcPassedBy")
+  dispatchesMade          Dispatch[]          @relation("DispatchedBy")
+  deliveriesValidated     Dispatch[]          @relation("DeliveryValidatedBy")
+  ticketsAssigned         ServiceTicket[]     @relation("TicketAssignee")
+  ticketsClosed           ServiceTicket[]     @relation("TicketClosedBy")
+  materialRequestsRaised  MaterialRequest[]   @relation("MrdRaisedBy")
+  purchaseOrdersRaised    VendorPurchaseOrder[] @relation("PoRaisedBy")
+  grnReceived             VendorPurchaseOrder[] @relation("PoGrnReceivedBy")
+  invoicesIssued          Invoice[]           @relation("InvoiceIssuedBy")
+  escalationsReviewed     BreakdownEscalation[] @relation("EscalationReviewedBy")
+
+  @@unique([tenantId, email])
+  @@index([tenantId, organizationId])
+  @@index([roleId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id         Int       @id @default(autoincrement())
+  userId     Int       @map("user_id")
+  tokenHash  String    @map("token_hash")
+  userAgent  String?   @map("user_agent")
+  ipAddress  String?   @map("ip_address")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+// =========================================================================
+// PLATFORM SUPER ADMIN (sits ABOVE tenants — has no tenantId)
+// =========================================================================
+// Multi-tenant URL model:
+//   - Tenant login URL  : /:companyCode/login   (companyCode = Tenant.slug)
+//   - Super admin URL    : /super-admin/login   (no tenant context ever)
+// Super admins are deliberately a SEPARATE table from `users`, so a tenant
+// user can never be escalated into a platform user and vice-versa. Their
+// refresh tokens live in their own table for the same isolation reason.
+// =========================================================================
+
+model PlatformUser {
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  firstName    String    @map("first_name")
+  lastName     String    @map("last_name")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  deletedAt    DateTime? @map("deleted_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  refreshTokens PlatformRefreshToken[]
+
+  @@map("platform_users")
+}
+
+model PlatformRefreshToken {
+  id             Int       @id @default(autoincrement())
+  platformUserId Int       @map("platform_user_id")
+  tokenHash      String    @map("token_hash")
+  userAgent      String?   @map("user_agent")
+  ipAddress      String?   @map("ip_address")
+  expiresAt      DateTime  @map("expires_at")
+  revokedAt      DateTime? @map("revoked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  platformUser PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+
+  @@index([platformUserId])
+  @@index([tokenHash])
+  @@map("platform_refresh_tokens")
+}
+
+// =========================================================================
+// MASTER DATA (DB-seeded — never hardcoded status strings in services)
+// =========================================================================
+
+model Status {
+  id         Int      @id @default(autoincrement())
+  tenantId   Int      @map("tenant_id")
+  entityType String   @map("entity_type") // e.g. "INSTALLATION_PROJECT", "AMC_CONTRACT"
+  code       String // e.g. "IN_PROGRESS" — stable key used by services
+  label      String // e.g. "In Progress" — display value
+  color      String? // optional UI hint, e.g. "amber"
+  sortOrder  Int      @default(0) @map("sort_order")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  lifts                Lift[]
+  installationProjects InstallationProject[]
+  installationTasks    InstallationTask[]
+  installationMilestones InstallationMilestone[]
+  amcContracts         AmcContract[]
+  amcSchedules         AmcSchedule[]
+  amcVisits            AmcVisit[]
+
+   leads                   Lead[]              @relation("LeadStatus")
+  quotations              Quotation[]         @relation("QuotationStatus")
+  transitionsFrom         WorkflowTransition[] @relation("TransitionFromStatus")
+  transitionsTo           WorkflowTransition[] @relation("TransitionToStatus")
+  gadDesigns              GadDesign[]         @relation("GadDesignStatus")
+  manufacturingOrders     ManufacturingOrder[] @relation("ManufOrderStatus")
+  dispatches              Dispatch[]          @relation("DispatchStatus")
+  serviceTickets          ServiceTicket[]     @relation("TicketStatus")
+  materialRequests        MaterialRequest[]   @relation("MrdStatus")
+  vendorPurchaseOrders    VendorPurchaseOrder[] @relation("PoStatus")
+  invoices                Invoice[]           @relation("InvoiceStatus")
+  breakdownEscalations    BreakdownEscalation[] @relation("EscalationStatus")
+
+  @@unique([tenantId, entityType, code])
+  @@index([tenantId, entityType])
+  @@map("statuses")
+}
+
+model LiftType {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @map("tenant_id")
+  code      String // e.g. "PASSENGER"
+  name      String // e.g. "Passenger Lift"
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lifts InstallationProject[]
+  liftRecords Lift[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("lift_types")
+}
+
+model ServiceType {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @map("tenant_id")
+  code      String // e.g. "PREVENTIVE"
+  name      String // e.g. "Preventive Maintenance"
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  amcContracts AmcContract[]
+  amcSchedules AmcSchedule[]
+  amcVisits    AmcVisit[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("service_types")
+}
+
+// =========================================================================
+// CRM: CUSTOMERS & SITES
+// =========================================================================
+
+model Customer {
+  id             Int       @id @default(autoincrement())
+  tenantId       Int       @map("tenant_id")
+  organizationId Int       @map("organization_id")
+  name           String
+  email          String?
+  phone          String?
+  gstNumber      String?   @map("gst_number")
+  billingAddress String?   @map("billing_address")
+  deletedAt      DateTime? @map("deleted_at")
+  createdById    Int?      @map("created_by_id")
+  updatedById    Int?      @map("updated_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  sites                Site[]
+  installationProjects InstallationProject[]
+  amcContracts         AmcContract[]
+   leads               Lead[]              @relation("LeadCustomer")
+
+  @@index([tenantId, organizationId])
+  @@map("customers")
+}
+
+model Site {
+  id             Int       @id @default(autoincrement())
+  tenantId       Int       @map("tenant_id")
+  organizationId Int       @map("organization_id")
+  customerId     Int       @map("customer_id")
+  name           String
+  addressLine1   String    @map("address_line_1")
+  addressLine2   String?   @map("address_line_2")
+  city           String?
+  state          String?
+  pincode        String?
+  latitude       Decimal?  @db.Decimal(9, 6)
+  longitude      Decimal?  @db.Decimal(9, 6)
+  deletedAt      DateTime? @map("deleted_at")
+  createdById    Int?      @map("created_by_id")
+  updatedById    Int?      @map("updated_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  customer             Customer               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lifts                Lift[]
+  installationProjects InstallationProject[]
+  leads               Lead[]              @relation("LeadSite")
+
+  @@index([tenantId, organizationId])
+  @@index([customerId])
+  @@map("sites")
+}
+
+// =========================================================================
+// LIFT (the physical asset — created on installation completion, consumed by AMC)
+// =========================================================================
+
+model Lift {
+  id                  Int       @id @default(autoincrement())
+  tenantId            Int       @map("tenant_id")
+  organizationId      Int       @map("organization_id")
+  siteId              Int       @map("site_id")
+  liftTypeId          Int       @map("lift_type_id")
+  statusId            Int       @map("status_id") // Status entityType = "LIFT"
+  serialNumber        String    @map("serial_number")
+  model               String?
+  capacityKg          Int?      @map("capacity_kg")
+  numberOfFloors      Int?      @map("number_of_floors")
+  installationDate    DateTime? @map("installation_date")
+  warrantyExpiryDate  DateTime? @map("warranty_expiry_date")
+  deletedAt           DateTime? @map("deleted_at")
+  createdById         Int?      @map("created_by_id")
+  updatedById         Int?      @map("updated_by_id")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  site     Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  liftType LiftType @relation(fields: [liftTypeId], references: [id], onDelete: Restrict)
+  status   Status   @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  serviceTickets        ServiceTicket[]     @relation("TicketLift")
+  breakdownEscalations  BreakdownEscalation[] @relation("EscalationLift")
+
+  installationProject InstallationProject?
+  amcContracts        AmcContract[]
+  amcVisits           AmcVisit[]
+
+  @@unique([tenantId, serialNumber])
+  @@index([tenantId, organizationId])
+  @@index([siteId])
+  @@map("lifts")
+}
+
+// =========================================================================
+// INSTALLATION WORKFLOW
+// =========================================================================
+
+model InstallationProject {
+  id                    Int       @id @default(autoincrement())
+  tenantId              Int       @map("tenant_id")
+  organizationId        Int       @map("organization_id")
+  projectCode           String    @map("project_code")
+  customerId            Int       @map("customer_id")
+  siteId                Int       @map("site_id")
+  liftTypeId            Int       @map("lift_type_id") // lift spec chosen before Lift record exists
+  liftId                Int?      @unique @map("lift_id") // populated once installation completes and Lift is created
+  statusId              Int       @map("status_id") // Status entityType = "INSTALLATION_PROJECT"
+  assignedEngineerId    Int?      @map("assigned_engineer_id")
+  plannedStartDate      DateTime? @map("planned_start_date")
+  plannedEndDate        DateTime? @map("planned_end_date")
+  actualStartDate       DateTime? @map("actual_start_date")
+  actualEndDate         DateTime? @map("actual_end_date")
+  deletedAt             DateTime? @map("deleted_at")
+  createdById           Int?      @map("created_by_id")
+  updatedById           Int?      @map("updated_by_id")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  siteSurvey          SiteSurvey?
+  gadDesigns          GadDesign[]
+  manufacturingOrders ManufacturingOrder[]
+  dispatches          Dispatch[]
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  site     Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  liftType LiftType @relation(fields: [liftTypeId], references: [id], onDelete: Restrict)
+  status   Status   @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  lift     Lift?    @relation(fields: [liftId], references: [id], onDelete: SetNull)
+
+  tasks      InstallationTask[]
+  milestones InstallationMilestone[]
+
+  @@unique([tenantId, projectCode])
+  @@index([tenantId, organizationId])
+  @@index([statusId])
+  @@map("installation_projects")
+}
+
+model InstallationTask {
+  id                     Int       @id @default(autoincrement())
+  tenantId               Int       @map("tenant_id")
+  installationProjectId  Int       @map("installation_project_id")
+  title                  String
+  description            String?
+  statusId               Int       @map("status_id") // Status entityType = "INSTALLATION_TASK"
+  sequence               Int       @default(0)
+  assignedToId           Int?      @map("assigned_to_id")
+  dueDate                DateTime? @map("due_date")
+  completedAt            DateTime? @map("completed_at")
+  deletedAt              DateTime? @map("deleted_at")
+  createdById            Int?      @map("created_by_id")
+  updatedById            Int?      @map("updated_by_id")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  installationProject InstallationProject @relation(fields: [installationProjectId], references: [id], onDelete: Cascade)
+  status              Status               @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  assignedTo          User?                @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([installationProjectId])
+  @@index([assignedToId])
+  @@map("installation_tasks")
+}
+
+model InstallationMilestone {
+  id                     Int       @id @default(autoincrement())
+  tenantId               Int       @map("tenant_id")
+  installationProjectId  Int       @map("installation_project_id")
+  name                   String // e.g. "Site Survey", "Equipment Delivered", "Final Handover"
+  statusId               Int       @map("status_id") // Status entityType = "INSTALLATION_PROJECT" (reuse project-level statuses)
+  signOffById            Int?      @map("sign_off_by_id")
+  signOffAt              DateTime? @map("sign_off_at")
+  remarks                String?
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  installationProject InstallationProject @relation(fields: [installationProjectId], references: [id], onDelete: Cascade)
+  status              Status               @relation(fields: [statusId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([installationProjectId])
+  @@map("installation_milestones")
+}
+
+// =========================================================================
+// AMC WORKFLOW
+// =========================================================================
+
+model AmcContract {
+  id                     Int       @id @default(autoincrement())
+  tenantId               Int       @map("tenant_id")
+  organizationId         Int       @map("organization_id")
+  contractNumber         String    @map("contract_number")
+  customerId             Int       @map("customer_id")
+  liftId                 Int       @map("lift_id")
+  statusId               Int       @map("status_id") // Status entityType = "AMC_CONTRACT"
+  serviceTypeId          Int       @map("service_type_id") // default/primary service type for this contract
+  startDate              DateTime  @map("start_date")
+  endDate                DateTime  @map("end_date")
+  contractValue          Decimal?  @map("contract_value") @db.Decimal(12, 2)
+  numberOfServicesPerYear Int      @default(4) @map("number_of_services_per_year")
+  tier                   String?   // BASIC | STANDARD | PREMIUM
+  autoRenew              Boolean   @default(false) @map("auto_renew")
+  deletedAt              DateTime? @map("deleted_at")
+  createdById            Int?      @map("created_by_id")
+  updatedById            Int?      @map("updated_by_id")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lift        Lift        @relation(fields: [liftId], references: [id], onDelete: Restrict)
+  status      Status      @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  serviceType ServiceType @relation(fields: [serviceTypeId], references: [id], onDelete: Restrict)
+
+  schedules AmcSchedule[]
+  visits    AmcVisit[]
+  serviceTickets      ServiceTicket[]
+  invoices            Invoice[]
+
+  @@unique([tenantId, contractNumber])
+  @@index([tenantId, organizationId])
+  @@index([liftId])
+  @@index([statusId])
+  @@map("amc_contracts")
+}
+
+model AmcSchedule {
+  id             Int       @id @default(autoincrement())
+  tenantId       Int       @map("tenant_id")
+  amcContractId  Int       @map("amc_contract_id")
+  serviceTypeId  Int       @map("service_type_id")
+  statusId       Int       @map("status_id") // Status entityType = "AMC_SCHEDULE"
+  scheduledDate  DateTime  @map("scheduled_date")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  amcContract AmcContract @relation(fields: [amcContractId], references: [id], onDelete: Cascade)
+  serviceType ServiceType @relation(fields: [serviceTypeId], references: [id], onDelete: Restrict)
+  status      Status      @relation(fields: [statusId], references: [id], onDelete: Restrict)
+
+
+  visits AmcVisit[]
+  serviceTickets      ServiceTicket[]
+
+  @@index([tenantId])
+  @@index([amcContractId])
+  @@index([scheduledDate])
+  @@map("amc_schedules")
+}
+
+model AmcVisit {
+  id              Int       @id @default(autoincrement())
+  tenantId        Int       @map("tenant_id")
+  amcContractId   Int       @map("amc_contract_id")
+  amcScheduleId   Int?      @map("amc_schedule_id") // null for ad-hoc / breakdown visits
+  liftId          Int       @map("lift_id")
+  serviceTypeId   Int       @map("service_type_id")
+  statusId        Int       @map("status_id") // Status entityType = "AMC_VISIT"
+  technicianId    Int?      @map("technician_id")
+  visitDate       DateTime  @map("visit_date")
+  findings        String?
+  actionsTaken    String?   @map("actions_taken")
+  nextServiceDate DateTime? @map("next_service_date")
+  deletedAt       DateTime? @map("deleted_at")
+  createdById     Int?      @map("created_by_id")
+  updatedById     Int?      @map("updated_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  amcContract AmcContract  @relation(fields: [amcContractId], references: [id], onDelete: Cascade)
+  amcSchedule AmcSchedule? @relation(fields: [amcScheduleId], references: [id], onDelete: SetNull)
+  lift        Lift         @relation(fields: [liftId], references: [id], onDelete: Restrict)
+  serviceType ServiceType  @relation(fields: [serviceTypeId], references: [id], onDelete: Restrict)
+  status      Status       @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  technician  User?        @relation("VisitTechnician", fields: [technicianId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([amcContractId])
+  @@index([liftId])
+  @@index([technicianId])
+  @@map("amc_visits")
+}
+
+// =========================================================================
+// SHARED / REUSABLE MODULES (used by both workflows — no duplication)
+// =========================================================================
+
+// Polymorphic checklist, reused by InstallationTask and AmcVisit (entityType + entityId)
+model ChecklistItem {
+  id           Int       @id @default(autoincrement())
+  tenantId     Int       @map("tenant_id")
+  entityType   String    @map("entity_type") // "INSTALLATION_TASK" | "AMC_VISIT"
+  entityId     Int       @map("entity_id")
+  label        String
+  isChecked    Boolean   @default(false) @map("is_checked")
+  checkedById  Int?      @map("checked_by_id")
+  checkedAt    DateTime? @map("checked_at")
+  remarks      String?
+  sortOrder    Int       @default(0) @map("sort_order")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  checkedBy User? @relation("ChecklistCheckedBy", fields: [checkedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([entityType, entityId])
+  @@map("checklist_items")
+}
+
+// Polymorphic file attachments (S3-backed), reused across Installation certificates,
+// checklist photos, and AMC visit reports.
+model FileAsset {
+  id             Int      @id @default(autoincrement())
+  tenantId       Int      @map("tenant_id")
+  organizationId Int      @map("organization_id")
+  entityType     String   @map("entity_type") // "INSTALLATION_PROJECT" | "INSTALLATION_MILESTONE" | "AMC_VISIT" ...
+  entityId       Int      @map("entity_id")
+  fileKey        String   @map("file_key") // S3 object key
+  fileName       String   @map("file_name")
+  mimeType       String   @map("mime_type")
+  sizeBytes      Int      @map("size_bytes")
+  uploadedById   Int?     @map("uploaded_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, organizationId])
+  @@index([entityType, entityId])
+  @@map("file_assets")
+}
+
+// =========================================================================
+// AUDIT & ACTIVITY LOGS
+// =========================================================================
+
+// Structured, compliance-grade record of field-level changes.
+model AuditLog {
+  id             Int      @id @default(autoincrement())
+  tenantId       Int      @map("tenant_id")
+  organizationId Int      @map("organization_id")
+  userId         Int?     @map("user_id")
+  entityType     String   @map("entity_type")
+  entityId       Int      @map("entity_id")
+  action         String // "CREATE" | "UPDATE" | "DELETE" | "STATUS_CHANGE"
+  changes        Json? // { field: { before, after } }
+  ipAddress      String?  @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, organizationId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// Human-readable activity feed for UI timelines (e.g. "John assigned task to Priya").
+model ActivityLog {
+  id         Int      @id @default(autoincrement())
+  tenantId   Int      @map("tenant_id")
+  entityType String   @map("entity_type")
+  entityId   Int      @map("entity_id")
+  userId     Int?     @map("user_id")
+  message    String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([entityType, entityId])
+  @@map("activity_logs")
+}
+
+
+// ============================================================
+// MODULE 12 — Schema v2 Additions
+// INSTRUCTIONS: Append everything below to the BOTTOM of your
+// existing apps/backend/src/prisma/schema.prisma file.
+// Then run: cd apps/backend && npx prisma db push
+// ============================================================
+
+// ─── SHARED / CROSS-CUTTING ────────────────────────────────
+
+model Lead {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  leadCode         String
+  vertical         String    // INSTALLATION | AMC
+  customerId       Int?
+  customer         Customer? @relation("LeadCustomer", fields: [customerId], references: [id])
+  siteId           Int?
+  site             Site?     @relation("LeadSite", fields: [siteId], references: [id])
+  statusId         Int
+  status           Status    @relation("LeadStatus", fields: [statusId], references: [id])
+  assignedToId     Int?
+  assignedTo       User?     @relation("LeadAssignee", fields: [assignedToId], references: [id])
+  source           String?   // REFERRAL | DIRECT | CHANNEL_PARTNER | WARRANTY_EXPIRY | RENEWAL_DUE
+  contactName      String?
+  contactPhone     String?
+  contactEmail     String?
+  notes            String?
+  modernizationFlag Boolean  @default(false)
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  quotations            Quotation[]
+  workflowTransitions   WorkflowTransition[] @relation("LeadTransitions")
+  breakdownEscalations  BreakdownEscalation[]
+
+  @@index([tenantId, vertical])
+  @@index([tenantId, statusId])
+}
+
+model Quotation {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  quotationCode    String
+  leadId           Int
+  lead             Lead      @relation(fields: [leadId], references: [id])
+  version          Int       @default(1)
+  tier             String?   // BASIC | STANDARD | PREMIUM (AMC); null for Installation
+  statusId         Int
+  status           Status    @relation("QuotationStatus", fields: [statusId], references: [id])
+  preparedById     Int?
+  preparedBy       User?     @relation("QuotationPreparedBy", fields: [preparedById], references: [id])
+  approvedById     Int?
+  approvedBy       User?     @relation("QuotationApprovedBy", fields: [approvedById], references: [id])
+  approvedAt       DateTime?
+  validUntil       DateTime?
+  totalAmount      Decimal?  @db.Decimal(12, 2)
+  notes            String?
+  rejectionReason  String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  payments              Payment[]
+  
+
+  @@index([tenantId, leadId])
+  @@index([tenantId, statusId])
+}
+
+model WorkflowTransition {
+  id               Int      @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  entityType       String   // LEAD | INSTALLATION_PROJECT | AMC_CONTRACT | SERVICE_TICKET | etc.
+  entityId         Int
+  fromStatusId     Int?
+  fromStatus       Status?  @relation("TransitionFromStatus", fields: [fromStatusId], references: [id])
+  toStatusId       Int
+  toStatus         Status   @relation("TransitionToStatus", fields: [toStatusId], references: [id])
+  actionedById     Int
+  actionedBy       User     @relation("TransitionActionedBy", fields: [actionedById], references: [id])
+  remarks          String?
+  createdAt        DateTime @default(now())
+
+  // Named relations for Lead/InstallationProject
+  lead             Lead?    @relation("LeadTransitions", fields: [entityId], references: [id], map: "wt_lead_fk")
+
+  @@index([tenantId, entityType, entityId])
+}
+
+model ChecklistTemplate {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  name             String    // e.g. "IS_14665_PM_STANDARD", "INSTALLATION_QA_AUDIT"
+  description      String?
+  entityType       String    // the entityType this template applies to
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  items            ChecklistTemplateItem[]
+
+  @@index([tenantId, entityType])
+}
+
+model ChecklistTemplateItem {
+  id                  Int               @id @default(autoincrement())
+  tenantId            Int
+  organizationId      Int
+  checklistTemplateId Int
+  template            ChecklistTemplate @relation(fields: [checklistTemplateId], references: [id])
+  label               String
+  sortOrder           Int               @default(0)
+  isActive            Boolean           @default(true)
+  createdAt           DateTime          @default(now())
+
+  @@index([checklistTemplateId])
+}
+
+model Payment {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  entityType       String    // QUOTATION | INVOICE
+  entityId         Int
+  quotationId      Int?
+  quotation        Quotation? @relation(fields: [quotationId], references: [id])
+  invoiceId        Int?
+  invoice          Invoice?  @relation(fields: [invoiceId], references: [id])
+  amount           Decimal   @db.Decimal(12, 2)
+  method           String?   // BANK_TRANSFER | CHEQUE | CASH | ONLINE
+  reference        String?
+  verifiedById     Int?
+  verifiedBy       User?     @relation("PaymentVerifiedBy", fields: [verifiedById], references: [id])
+  verifiedAt       DateTime?
+  notes            String?
+  createdAt        DateTime  @default(now())
+
+  @@index([tenantId, entityType, entityId])
+}
+
+// ─── INSTALLATION-SPECIFIC ─────────────────────────────────
+
+model SiteSurvey {
+  id                      Int       @id @default(autoincrement())
+  tenantId                Int
+  organizationId          Int
+  installationProjectId   Int       @unique
+  installationProject     InstallationProject @relation(fields: [installationProjectId], references: [id])
+  surveyedById            Int?
+  surveyedBy              User?     @relation("SiteSurveyedBy", fields: [surveyedById], references: [id])
+  surveyedAt              DateTime?
+  pitDepthMm              Int?
+  shaftWidthMm            Int?
+  shaftDepthMm            Int?
+  overheadClearanceMm     Int?
+  powerAvailability       String?   // SINGLE_PHASE | THREE_PHASE | NOT_AVAILABLE
+  powerVoltage            Int?
+  machineRoomAvailable    Boolean?
+  floorCount              Int?
+  buildingType            String?
+  accessibilityNotes      String?
+  observations            String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@index([tenantId])
+}
+
+model GadDesign {
+  id                      Int       @id @default(autoincrement())
+  tenantId                Int
+  organizationId          Int
+  installationProjectId   Int
+  installationProject     InstallationProject @relation(fields: [installationProjectId], references: [id])
+  version                 Int       @default(1)
+  statusId                Int
+  status                  Status    @relation("GadDesignStatus", fields: [statusId], references: [id])
+  preparedById            Int?
+  preparedBy              User?     @relation("GadPreparedBy", fields: [preparedById], references: [id])
+  reviewedById            Int?
+  reviewedBy              User?     @relation("GadReviewedBy", fields: [reviewedById], references: [id])
+  reviewedAt              DateTime?
+  revisionNotes           String?
+  notes                   String?
+  approvedAt              DateTime?
+  fileUrl                 String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@index([tenantId, installationProjectId])
+}
+
+model ManufacturingOrder {
+  id                      Int       @id @default(autoincrement())
+  tenantId                Int
+  organizationId          Int
+  orderCode               String
+  installationProjectId   Int
+  installationProject     InstallationProject @relation(fields: [installationProjectId], references: [id])
+  statusId                Int
+  status                  Status    @relation("ManufOrderStatus", fields: [statusId], references: [id])
+  releasedById            Int?
+  releasedBy              User?     @relation("ManufReleasedBy", fields: [releasedById], references: [id])
+  releasedAt              DateTime?
+  qcPassedAt              DateTime?
+  qcPassedById            Int?
+  qcPassedBy              User?     @relation("ManufQcPassedBy", fields: [qcPassedById], references: [id])
+  notes                   String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  dispatches              Dispatch[]
+
+  @@index([tenantId, installationProjectId])
+}
+
+model Dispatch {
+  id                      Int       @id @default(autoincrement())
+  tenantId                Int
+  organizationId          Int
+  dispatchCode            String
+  manufacturingOrderId    Int
+  manufacturingOrder      ManufacturingOrder @relation(fields: [manufacturingOrderId], references: [id])
+  installationProjectId   Int
+  installationProject     InstallationProject @relation(fields: [installationProjectId], references: [id])
+  statusId                Int
+  status                  Status    @relation("DispatchStatus", fields: [statusId], references: [id])
+  waybillNumber           String?
+  carrierName             String?
+  dispatchedAt            DateTime?
+  dispatchedById          Int?
+  dispatchedBy            User?     @relation("DispatchedBy", fields: [dispatchedById], references: [id])
+  estimatedDeliveryDate   DateTime?
+  deliveredAt             DateTime?
+  deliveryValidatedById   Int?
+  deliveryValidatedBy     User?     @relation("DeliveryValidatedBy", fields: [deliveryValidatedById], references: [id])
+  exceptionNotes          String?
+  notes                   String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@index([tenantId, installationProjectId])
+}
+
+// ─── AMC-SPECIFIC ──────────────────────────────────────────
+
+model ServiceTicket {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  ticketCode       String
+  amcContractId    Int
+  amcContract      AmcContract @relation(fields: [amcContractId], references: [id])
+  liftId           Int
+  lift             Lift      @relation("TicketLift", fields: [liftId], references: [id])
+  statusId         Int
+  status           Status    @relation("TicketStatus", fields: [statusId], references: [id])
+  source           String    // AUTO_PM | CLIENT_PORTAL | WHATSAPP | PHONE | MANUAL
+  categoryTag      String?   // PM | MECHANICAL | ELECTRICAL | DOOR | SAFETY_CIRCUIT
+  priorityFlag     String    @default("NORMAL") // LOW | NORMAL | HIGH | CRITICAL
+  passengerEntrapped Boolean @default(false)
+  assignedToId     Int?
+  assignedTo       User?     @relation("TicketAssignee", fields: [assignedToId], references: [id])
+  assignedAt       DateTime?
+  amcScheduleId    Int?
+  amcSchedule      AmcSchedule? @relation(fields: [amcScheduleId], references: [id])
+  findings         String?
+  recommendations  String?
+  resolvedAt       DateTime?
+  closedAt         DateTime?
+  closedById       Int?
+  closedBy         User?     @relation("TicketClosedBy", fields: [closedById], references: [id])
+  nextServiceDate  DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  materialRequests      MaterialRequest[]
+  
+
+  @@index([tenantId, amcContractId])
+  @@index([tenantId, statusId])
+  @@index([tenantId, liftId])
+}
+
+model MaterialRequest {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  mrdCode          String
+  serviceTicketId  Int
+  serviceTicket    ServiceTicket @relation(fields: [serviceTicketId], references: [id])
+  statusId         Int
+  status           Status    @relation("MrdStatus", fields: [statusId], references: [id])
+  raisedById       Int
+  raisedBy         User      @relation("MrdRaisedBy", fields: [raisedById], references: [id])
+  coverageEligible Boolean   @default(true)
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  lineItems        MaterialRequestItem[]
+
+  @@index([tenantId, serviceTicketId])
+}
+
+model MaterialRequestItem {
+  id                  Int             @id @default(autoincrement())
+  materialRequestId   Int
+  materialRequest     MaterialRequest @relation(fields: [materialRequestId], references: [id])
+  partNumber          String
+  partName            String
+  quantityRequested   Int
+  quantityIssued      Int             @default(0)
+  inventoryStockId    Int?
+  inventoryStock      InventoryStock? @relation(fields: [inventoryStockId], references: [id])
+  vendorPoId          Int?
+  vendorPo            VendorPurchaseOrder? @relation(fields: [vendorPoId], references: [id])
+  createdAt           DateTime        @default(now())
+
+  @@index([materialRequestId])
+}
+
+model InventoryStock {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  partNumber       String
+  partName         String
+  description      String?
+  quantityOnHand   Int       @default(0)
+  reorderLevel     Int       @default(0)
+  location         String?
+  bisIsiCertified  Boolean   @default(false)
+  unitCost         Decimal?  @db.Decimal(10, 2)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  materialRequestItems MaterialRequestItem[]
+
+  @@unique([tenantId, partNumber])
+  @@index([tenantId])
+}
+
+model Vendor {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  vendorCode       String
+  name             String
+  contactName      String?
+  contactPhone     String?
+  contactEmail     String?
+  address          String?
+  bisIsiApproved   Boolean   @default(false)
+  isActive         Boolean   @default(true)
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  purchaseOrders   VendorPurchaseOrder[]
+
+  @@unique([tenantId, vendorCode])
+  @@index([tenantId])
+}
+
+model VendorPurchaseOrder {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  poCode           String
+  vendorId         Int
+  vendor           Vendor    @relation(fields: [vendorId], references: [id])
+  statusId         Int
+  status           Status    @relation("PoStatus", fields: [statusId], references: [id])
+  raisedById       Int
+  raisedBy         User      @relation("PoRaisedBy", fields: [raisedById], references: [id])
+  expectedDelivery DateTime?
+  grnReceivedAt    DateTime?
+  grnReceivedById  Int?
+  grnReceivedBy    User?     @relation("PoGrnReceivedBy", fields: [grnReceivedById], references: [id])
+  bisIsiCertFlag   Boolean   @default(false)
+  totalAmount      Decimal?  @db.Decimal(12, 2)
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  lineItems        MaterialRequestItem[]
+
+  @@unique([tenantId, poCode])
+  @@index([tenantId, vendorId])
+}
+
+model Invoice {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  invoiceCode      String
+  entityType       String    // AMC_CONTRACT | SERVICE_TICKET
+  entityId         Int
+  amcContractId    Int?
+  amcContract      AmcContract? @relation(fields: [amcContractId], references: [id])
+  statusId         Int
+  status           Status    @relation("InvoiceStatus", fields: [statusId], references: [id])
+  issuedById       Int
+  issuedBy         User      @relation("InvoiceIssuedBy", fields: [issuedById], references: [id])
+  issuedAt         DateTime  @default(now())
+  dueDate          DateTime?
+  subtotal         Decimal   @db.Decimal(12, 2) @default(0)
+  taxAmount        Decimal   @db.Decimal(12, 2) @default(0)
+  totalAmount      Decimal   @db.Decimal(12, 2) @default(0)
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  lineItems        InvoiceLineItem[]
+  payments         Payment[]
+
+  @@unique([tenantId, invoiceCode])
+  @@index([tenantId, entityType, entityId])
+}
+
+model InvoiceLineItem {
+  id               Int     @id @default(autoincrement())
+  invoiceId        Int
+  invoice          Invoice @relation(fields: [invoiceId], references: [id])
+  description      String
+  quantity         Int     @default(1)
+  unitPrice        Decimal @db.Decimal(10, 2)
+  lineTotal        Decimal @db.Decimal(12, 2)
+  createdAt        DateTime @default(now())
+
+  @@index([invoiceId])
+}
+
+model BreakdownEscalation {
+  id               Int       @id @default(autoincrement())
+  tenantId         Int
+  organizationId   Int
+  escalationCode   String
+  liftId           Int
+  lift             Lift      @relation("EscalationLift", fields: [liftId], references: [id])
+  leadId           Int?
+  lead             Lead?     @relation(fields: [leadId], references: [id])
+  statusId         Int
+  status           Status    @relation("EscalationStatus", fields: [statusId], references: [id])
+  triggeredAt      DateTime  @default(now())
+  breakdownCount   Int       // how many breakdowns triggered this
+  windowDays       Int       @default(60)
+  reviewedById     Int?
+  reviewedBy       User?     @relation("EscalationReviewedBy", fields: [reviewedById], references: [id])
+  reviewedAt       DateTime?
+  resolution       String?   // RESOLVED_IN_AMC | ROUTED_TO_MODERNIZATION
+  notes            String?
+  closedAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([tenantId, liftId])
+  @@index([tenantId, statusId])
+}
