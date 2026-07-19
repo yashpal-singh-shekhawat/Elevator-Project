@@ -36,7 +36,7 @@ export function signAccessToken(payload: AccessTokenPayload): string {
 }
 
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  const payload = jwt.verify(token, env.JWT_ACCESS_SECRET) as AccessTokenPayload & { scope?: string };
+  const payload = jwt.verify(token, env.JWT_ACCESS_SECRET) as unknown as AccessTokenPayload & { scope?: string };
   // A platform (super-admin) token is signed with the same secret but has
   // scope:'PLATFORM' and no tenant claims. Reject it here so it can never be
   // used to drive a tenant-scoped request (which would otherwise filter data
@@ -54,7 +54,7 @@ export function signPlatformAccessToken(payload: PlatformAccessTokenPayload): st
 }
 
 export function verifyPlatformAccessToken(token: string): PlatformAccessTokenPayload {
-  const payload = jwt.verify(token, env.JWT_ACCESS_SECRET) as PlatformAccessTokenPayload;
+  const payload = jwt.verify(token, env.JWT_ACCESS_SECRET) as unknown as PlatformAccessTokenPayload;
   if (payload.scope !== 'PLATFORM') {
     throw new Error('Not a platform access token');
   }
@@ -68,5 +68,5 @@ export function signRefreshToken(payload: RefreshTokenPayload): string {
 }
 
 export function verifyRefreshToken(token: string): RefreshTokenPayload {
-  return jwt.verify(token, env.JWT_REFRESH_SECRET) as RefreshTokenPayload;
+  return jwt.verify(token, env.JWT_REFRESH_SECRET) as unknown as RefreshTokenPayload;
 }
