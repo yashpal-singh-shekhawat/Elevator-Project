@@ -20,7 +20,7 @@
     "docker:down": "docker compose down"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.0.0 <21.0.0"
   },
   "overrides": {
     "typescript": "5.5.4"
