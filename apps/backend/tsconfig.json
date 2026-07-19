@@ -32,5 +32,15 @@
     "emitDecoratorMetadata": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "**/*.spec.ts", "**/*.test.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.spec.ts",
+    "**/*.test.ts",
+    "src/modules/lead----",
+    "src/modules/lead_1",
+    "src/modules/installation-project----",
+    "src/modules/installation-project_1",
+    "src/modules/workflow-transition----------"
+  ]
 }

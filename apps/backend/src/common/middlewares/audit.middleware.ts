@@ -2,7 +2,9 @@ import { NextFunction, Request, Response } from 'express';
 import { prisma } from '@config/prisma';
 import { logger } from '@config/logger';
 
-export type AuditAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'STATUS_CHANGE';
+// Common lifecycle actions are suggested for editor autocomplete, but any
+// domain-specific action label (e.g. 'ASSIGN', 'APPROVE', 'SEND') is allowed.
+export type AuditAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'STATUS_CHANGE' | (string & {});
 
 export interface FieldChange {
   before: unknown;
