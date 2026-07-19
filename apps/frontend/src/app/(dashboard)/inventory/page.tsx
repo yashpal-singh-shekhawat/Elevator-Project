@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Plus, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { useInventory } from '@/hooks/queries/use-inventory';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';

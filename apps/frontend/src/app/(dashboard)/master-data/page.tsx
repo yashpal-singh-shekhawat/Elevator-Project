@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useStatusesAdmin, useLiftTypesAdmin, useServiceTypesAdmin } from '@/hooks/queries/use-master-data-admin';
 import { usePermissions } from '@/hooks/use-permissions';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';

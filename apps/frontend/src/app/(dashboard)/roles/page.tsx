@@ -47,11 +47,6 @@ export default function RolesPage() {
     if (selectedRole) setDraft(new Set(selectedRole.permissionCodes));
   }, [selectedRole]);
 
-  const allCodes = useMemo(
-    () => (catalog ?? []).flatMap((g) => g.permissions.map((p) => p.code)),
-    [catalog]
-  );
-
   const locked = !selectedRole || selectedRole.isSystem;
 
   // Dirty check: draft differs from the role's saved set.

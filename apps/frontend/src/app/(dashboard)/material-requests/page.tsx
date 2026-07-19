@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useMaterialRequests, useApproveMaterialRequest, useIssueFromStock, useRejectMaterialRequest } from '@/hooks/queries/use-material-requests';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
