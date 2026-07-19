@@ -3,7 +3,7 @@ import { TenantContext } from '@common/types/tenant-context';
 import { NotFoundError, BadRequestError } from '@common/errors';
 import { toPrismaListArgs } from '@common/utils/pagination';
 import { SiteSurveyRepository } from './site-survey.repository';
-import { CreateSiteSurveyInput, UpdateSiteSurveyInput, ListSiteSurveysQuerySchema } from './site-survey.validation';
+import { CreateSiteSurveyInput, UpdateSiteSurveyInput } from './site-survey.validation';
 
 const SORT_FIELDS = ['id', 'createdAt', 'surveyedAt'] as const;
 
